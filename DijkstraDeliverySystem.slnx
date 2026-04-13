@@ -4,7 +4,7 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="DijkstraDeliverySystem.vcxproj">
+  <Project Path="DijkstraDeliverySystem.vcxproj" Id="99735fbb-33ec-4cec-a10e-e580e16d93d3">
     <Deploy />
   </Project>
 </Solution>

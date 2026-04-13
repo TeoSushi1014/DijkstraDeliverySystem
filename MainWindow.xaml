@@ -9,7 +9,59 @@
     mc:Ignorable="d"
     Title="DijkstraDeliverySystem">
 
-    <Grid>
+    <Grid Padding="16" RowSpacing="12" ColumnSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
 
+        <StackPanel Orientation="Horizontal" Spacing="8">
+            <TextBlock VerticalAlignment="Center" Style="{ThemeResource BodyStrongTextBlockStyle}" Text="Case" />
+            <ComboBox x:Name="TestCaseBox" Width="130" SelectedIndex="0" SelectionChanged="TestCaseBox_SelectionChanged">
+                <ComboBoxItem Content="TC1 - Reachable" />
+                <ComboBoxItem Content="TC2 - Multi-path" />
+                <ComboBoxItem Content="TC3 - Unreachable" />
+                <ComboBoxItem Content="TC4 - Source=Target" />
+                <ComboBoxItem Content="TC5 - 50 Nodes" />
+            </ComboBox>
+
+            <TextBlock VerticalAlignment="Center" Style="{ThemeResource BodyStrongTextBlockStyle}" Text="Source" />
+            <TextBox x:Name="SourceNodeBox" Width="80" Text="0" />
+
+            <TextBlock Margin="12,0,0,0" VerticalAlignment="Center" Style="{ThemeResource BodyStrongTextBlockStyle}" Text="Target" />
+            <TextBox x:Name="TargetNodeBox" Width="80" Text="7" />
+
+            <TextBlock Margin="12,0,0,0" VerticalAlignment="Center" Style="{ThemeResource BodyStrongTextBlockStyle}" Text="Iterations" />
+            <TextBox x:Name="IterationBox" Width="100" Text="30" />
+
+            <Button x:Name="SolveButton" Margin="12,0,0,0" Click="SolveButton_Click" Content="Run Dijkstra" />
+        </StackPanel>
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="16">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <Border Width="14" Height="14" CornerRadius="7" Background="#0E7490" VerticalAlignment="Center" />
+                <TextBlock VerticalAlignment="Center" Text="Normal node" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <Border Width="14" Height="14" CornerRadius="7" Background="#22C55E" VerticalAlignment="Center" />
+                <TextBlock VerticalAlignment="Center" Text="Source (subtle pulse)" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <Border Width="14" Height="14" CornerRadius="7" Background="#F59E0B" VerticalAlignment="Center" />
+                <TextBlock VerticalAlignment="Center" Text="Target (strong pulse)" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <Border Width="14" Height="14" CornerRadius="7" Background="#DC2626" VerticalAlignment="Center" />
+                <TextBlock VerticalAlignment="Center" Text="Path node (light pulse)" />
+            </StackPanel>
+        </StackPanel>
+
+        <Border Grid.Row="2" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="8">
+            <Canvas x:Name="PathCanvas" MinHeight="420" />
+        </Border>
+
+        <TextBlock x:Name="StatusTextBlock" Grid.Row="3" Style="{ThemeResource BodyTextBlockStyle}" TextWrapping="Wrap" />
     </Grid>
 </Window>
