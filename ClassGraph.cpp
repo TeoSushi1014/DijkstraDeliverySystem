@@ -1,117 +1,165 @@
-#include <iostream>
-#include <vector>
-#include <list>
-#include <fstream>
-#include <random>
-#include <iomanip>
 
+#include <bits/stdc++.h>
 using namespace std;
 
 const int INF = 1e9;
 
-class Graph {
-private:
-    int V; // Số đỉnh
-    bool isMatrix; // Xác định kiểu lưu trữ
-
-    // 1. Ma trận kề
-    vector<vector<int>> adjMatrix;
-
-    // 2. Danh sách kề (vector chứa các cặp {đỉnh kề, trọng số})
-    vector<list<pair<int, int>>> adjList;
-
+// ================= DANH SÁCH KỀ =================
+class GraphList {
 public:
-    Graph(int vertices, bool useMatrix = true) : V(vertices), isMatrix(useMatrix) {
-        if (isMatrix) {
-            adjMatrix.assign(V, vector<int>(V, 0));
-        } else {
-            adjList.resize(V);
-        }
+    int V;
+    vector<vector<pair<int,int>>> adj;
+
+    GraphList(int v) {
+        V = v;
+        adj.resize(V);
     }
 
-    // Thêm cạnh
     void addEdge(int u, int v, int w) {
-        if (u >= V || v >= V) return;
-        if (isMatrix) {
-            adjMatrix[u][v] = w;
-            adjMatrix[v][u] = w; // Đồ thị vô hướng (cho giao thông)
-        } else {
-            adjList[u].push_back({v, w});
-            adjList[v].push_back({u, w});
-        }
+        adj[u].push_back({v, w});
+        // nếu vô hướng thì thêm dòng dưới
+        // adj[v].push_back({u, w});
     }
 
-    // Đọc dữ liệu từ file .txt
-    static Graph* fromFile(string filename, bool useMatrix) {
-        ifstream file(filename);
-        if (!file.is_open()) {
-            cout << "Không thể mở file!" << endl;
-            return nullptr;
-        }
-        int v, e;
-        file >> v >> e;
-        Graph* g = new Graph(v, useMatrix);
-        for (int i = 0; i < e; i++) {
-            int u, v_node, w;
-            file >> u >> v_node >> w;
-            g->addEdge(u, v_node, w);
-        }
-        file.close();
-        return g;
-    }
+    void dijkstra(int src) {
+        vector<int> dist(V, INF);
+        priority_queue<pair<int,int>, vector<pair<int,int>>, greater<>> pq;
 
-    // Tạo đồ thị ngẫu nhiên
-    void generateRandom(int E) {
-        random_device rd;
-        mt19937 gen(rd());
-        uniform_int_distribution<> disNode(0, V - 1);
-        uniform_int_distribution<> disWeight(1, 100);
+        dist[src] = 0;
+        pq.push({0, src});
 
-        for (int i = 0; i < E; i++) {
-            addEdge(disNode(gen()), disNode(gen()), disWeight(gen()));
-        }
-    }
+        while (!pq.empty()) {
+            int u = pq.top().second;
+            pq.pop();
 
-    // Hiển thị đồ thị để kiểm tra (Test dữ liệu)
-    void display() {
-        cout << "\n--- Cau truc do thi (" << (isMatrix ? "Ma tran ke" : "Danh sach ke") << ") ---" << endl;
-        if (isMatrix) {
-            for (int i = 0; i < V; i++) {
-                for (int j = 0; j < V; j++) {
-                    cout << setw(4) << adjMatrix[i][j];
+            for (auto x : adj[u]) {
+                int v = x.first;
+                int w = x.second;
+
+                if (dist[v] > dist[u] + w) {
+                    dist[v] = dist[u] + w;
+                    pq.push({dist[v], v});
                 }
-                cout << endl;
-            }
-        } else {
-            for (int i = 0; i < V; i++) {
-                cout << "Kho " << i << ": ";
-                for (auto& edge : adjList[i]) {
-                    cout << "-> (Kho " << edge.first << ", w:" << edge.second << ") ";
-                }
-                cout << endl;
             }
         }
+
+        cout << "Dijkstra (Adj List):\n";
+        for (int i = 0; i < V; i++)
+            cout << "Node " << i << " = " << dist[i] << endl;
     }
 };
 
-int main() {
-    int numNodes = 5;
-    int numEdges = 7;
+// ================= MA TRẬN KỀ =================
+class GraphMatrix {
+public:
+    int V;
+    vector<vector<int>> matrix;
 
-    // Test 1: Ma trận kề + Random
-    Graph gMatrix(numNodes, true);
-    gMatrix.generateRandom(numEdges);
-    cout << "Test 1: Random Matrix Graph";
-    gMatrix.display();
-
-    // Test 2: Danh sách kề + Read File
-    // Giả sử bạn đã có file "data.txt", nếu không chương trình sẽ báo lỗi mở file.
-    cout << "\nTest 2: Adjacency List from File";
-    Graph* gList = Graph::fromFile("graph.txt", false);
-    if (gList) {
-        gList->display();
-        delete gList;
+    GraphMatrix(int v) {
+        V = v;
+        matrix.assign(V, vector<int>(V, INF));
     }
+
+    void addEdge(int u, int v, int w) {
+        matrix[u][v] = w;
+        // nếu vô hướng:
+        // matrix[v][u] = w;
+    }
+
+    void dijkstra(int src) {
+        vector<int> dist(V, INF);
+        vector<bool> visited(V, false);
+
+        dist[src] = 0;
+
+        for (int i = 0; i < V - 1; i++) {
+            int u = -1;
+
+            for (int j = 0; j < V; j++)
+                if (!visited[j] && (u == -1 || dist[j] < dist[u]))
+                    u = j;
+
+            visited[u] = true;
+
+            for (int v = 0; v < V; v++) {
+                if (matrix[u][v] != INF && dist[v] > dist[u] + matrix[u][v]) {
+                    dist[v] = dist[u] + matrix[u][v];
+                }
+            }
+        }
+
+        cout << "\nDijkstra (Matrix):\n";
+        for (int i = 0; i < V; i++)
+            cout << "Node " << i << " = " << dist[i] << endl;
+    }
+};
+
+// ================= ĐỌC FILE =================
+// Format file:
+// V E
+// u v w
+GraphList readFileList(string filename) {
+    ifstream fin(filename);
+    int V, E;
+    fin >> V >> E;
+
+    GraphList g(V);
+
+    for (int i = 0; i < E; i++) {
+        int u, v, w;
+        fin >> u >> v >> w;
+        g.addEdge(u, v, w);
+    }
+
+    fin.close();
+    return g;
+}
+
+GraphMatrix readFileMatrix(string filename) {
+    ifstream fin(filename);
+    int V, E;
+    fin >> V >> E;
+
+    GraphMatrix g(V);
+
+    for (int i = 0; i < E; i++) {
+        int u, v, w;
+        fin >> u >> v >> w;
+        g.addEdge(u, v, w);
+    }
+
+    fin.close();
+    return g;
+}
+
+// ================= RANDOM GRAPH =================
+GraphList randomGraphList(int V, int E) {
+    GraphList g(V);
+    srand(time(0));
+
+    for (int i = 0; i < E; i++) {
+        int u = rand() % V;
+        int v = rand() % V;
+        int w = rand() % 100 + 1;
+        g.addEdge(u, v, w);
+    }
+
+    return g;
+}
+
+// ================= MAIN TEST =================
+int main() {
+    // ===== TEST FILE =====
+    GraphList g1 = readFileList("graph.txt");
+    g1.dijkstra(0);
+
+    GraphMatrix g2 = readFileMatrix("graph.txt");
+    g2.dijkstra(0);
+
+    // ===== TEST RANDOM =====
+    GraphList g3 = randomGraphList(5, 10);
+    cout << "\nRandom Graph Test:\n";
+    g3.dijkstra(0);
 
     return 0;
 }
