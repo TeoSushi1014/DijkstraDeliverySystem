@@ -2,6 +2,7 @@
 
 #include "Graph.h"
 
+#include <functional>
 #include <vector>
 
 namespace DijkstraDeliverySystem
@@ -26,11 +27,19 @@ namespace DijkstraDeliverySystem
         bool MatrixFound{};
         Graph::Weight MatrixDistance{};
         bool CrossCheckPassed{};
+        bool Cancelled{};
     };
 
     class DijkstraSolver
     {
     public:
-        DijkstraResult Solve(const Graph& graph, int source, int target, int benchmarkIterations = 30) const;
+        using ProgressCallback = std::function<bool(int completedIterations, int totalIterations)>;
+
+        DijkstraResult Solve(
+            const Graph& graph,
+            int source,
+            int target,
+            int benchmarkIterations = 30,
+            ProgressCallback progressCallback = nullptr) const;
     };
 }

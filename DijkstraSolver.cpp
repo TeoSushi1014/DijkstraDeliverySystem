@@ -140,7 +140,12 @@ namespace DijkstraDeliverySystem
         }
     }
 
-    DijkstraResult DijkstraSolver::Solve(const Graph& graph, int source, int target, int benchmarkIterations) const
+    DijkstraResult DijkstraSolver::Solve(
+        const Graph& graph,
+        int source,
+        int target,
+        int benchmarkIterations,
+        ProgressCallback progressCallback) const
     {
         if (graph.VertexCount() <= 0)
         {
@@ -179,7 +184,8 @@ namespace DijkstraDeliverySystem
                 stats,
                 true,
                 0,
-                true
+                true,
+                false
             };
         }
 
@@ -200,6 +206,8 @@ namespace DijkstraDeliverySystem
         RunState finalMatrixState{};
         long long totalMicroseconds = 0;
         long long totalMatrixMicroseconds = 0;
+        int completedIterations = 0;
+        bool cancelled = false;
 
         for (int i = 0; i < iterations; ++i)
         {
@@ -230,10 +238,47 @@ namespace DijkstraDeliverySystem
             {
                 finalMatrixState = std::move(matrixState);
             }
+
+            completedIterations = i + 1;
+
+            if (progressCallback && !progressCallback(completedIterations, iterations))
+            {
+                cancelled = true;
+                break;
+            }
         }
 
-        stats.AverageMicroseconds = static_cast<double>(totalMicroseconds) / static_cast<double>(iterations);
-        matrixStats.AverageMicroseconds = static_cast<double>(totalMatrixMicroseconds) / static_cast<double>(iterations);
+        if (completedIterations == 0)
+        {
+            BenchmarkStats emptyStats{};
+            emptyStats.Iterations = 0;
+            emptyStats.BestMicroseconds = 0;
+            emptyStats.AverageMicroseconds = 0.0;
+            emptyStats.WorstMicroseconds = 0;
+
+            std::vector<Graph::Weight> distances(static_cast<size_t>(graph.VertexCount()), kInfinity);
+            std::vector<int> parents(static_cast<size_t>(graph.VertexCount()), -1);
+
+            return DijkstraResult{
+                false,
+                -1,
+                {},
+                std::move(distances),
+                std::move(parents),
+                emptyStats,
+                emptyStats,
+                false,
+                -1,
+                true,
+                cancelled
+            };
+        }
+
+        stats.Iterations = completedIterations;
+        matrixStats.Iterations = completedIterations;
+
+        stats.AverageMicroseconds = static_cast<double>(totalMicroseconds) / static_cast<double>(completedIterations);
+        matrixStats.AverageMicroseconds = static_cast<double>(totalMatrixMicroseconds) / static_cast<double>(completedIterations);
 
         const Graph::Weight distance = finalState.Distances[static_cast<size_t>(target)];
         const bool found = (distance != kInfinity);
@@ -253,7 +298,8 @@ namespace DijkstraDeliverySystem
             matrixStats,
             matrixFound,
             matrixFound ? matrixDistance : -1,
-            crossCheckPassed
+            crossCheckPassed,
+            cancelled
         };
     }
 }

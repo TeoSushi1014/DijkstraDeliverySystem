@@ -34,9 +34,17 @@
             <TextBox x:Name="TargetNodeBox" Width="80" Text="7" />
 
             <TextBlock Margin="12,0,0,0" VerticalAlignment="Center" Style="{ThemeResource BodyStrongTextBlockStyle}" Text="Iterations" />
-            <TextBox x:Name="IterationBox" Width="100" Text="30" />
+            <NumberBox x:Name="IterationBox"
+                       Width="120"
+                       Value="30"
+                       Minimum="1"
+                       Maximum="1000"
+                       SmallChange="1"
+                       SpinButtonPlacementMode="Inline"
+                       AcceptsExpression="False" />
 
             <Button x:Name="SolveButton" Margin="12,0,0,0" Click="SolveButton_Click" Content="Run Dijkstra" />
+            <Button x:Name="CancelButton" Margin="8,0,0,0" Click="CancelButton_Click" Content="Cancel" IsEnabled="False" />
         </StackPanel>
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="16">
@@ -62,6 +70,9 @@
             <Canvas x:Name="PathCanvas" MinHeight="420" />
         </Border>
 
-        <TextBlock x:Name="StatusTextBlock" Grid.Row="3" Style="{ThemeResource BodyTextBlockStyle}" TextWrapping="Wrap" />
+        <StackPanel Grid.Row="3" Spacing="8">
+            <ProgressBar x:Name="BenchmarkProgressBar" Minimum="0" Maximum="100" Value="0" Height="6" Visibility="Collapsed" />
+            <TextBlock x:Name="StatusTextBlock" Style="{ThemeResource BodyTextBlockStyle}" TextWrapping="Wrap" />
+        </StackPanel>
     </Grid>
 </Window>

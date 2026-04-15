@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cwctype>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -27,6 +28,8 @@ namespace winrt::DijkstraDeliverySystem::implementation
     {
         m_isUiReady = false;
         InitializeComponent();
+        SetInteractionEnabled(true);
+        ResetProgressUI();
         BuildSampleGraph();
         RenderGraph({});
         StatusTextBlock().Text(L"Enter source and target nodes, then run Dijkstra.");
@@ -216,6 +219,12 @@ namespace winrt::DijkstraDeliverySystem::implementation
             return;
         }
 
+        if (m_isSolving)
+        {
+            StatusTextBlock().Text(L"Đang chạy Dijkstra, vui lòng chờ...");
+            return;
+        }
+
         auto sourceNodeBox = SourceNodeBox();
         auto targetNodeBox = TargetNodeBox();
         auto statusTextBlock = StatusTextBlock();
@@ -325,35 +334,132 @@ namespace winrt::DijkstraDeliverySystem::implementation
         ElementCompositionPreview::SetElementChildVisual(element, shadowVisual);
     }
 
-    void MainWindow::SolveButton_Click(IInspectable const&, RoutedEventArgs const&)
+    fire_and_forget MainWindow::SolveButton_Click(IInspectable const&, RoutedEventArgs const&)
     {
-        const int testCase = SelectedTestCase();
-        const int source = ParseIntOrDefault(SourceNodeBox().Text(), 0);
-        const int target = ParseIntOrDefault(TargetNodeBox().Text(), m_graph.VertexCount() - 1);
-        int iterations = ParseIntOrDefault(IterationBox().Text(), 30);
-        if (iterations <= 0)
+        auto lifetime = get_strong();
+
+        if (m_isSolving)
         {
-            iterations = 30;
+            StatusTextBlock().Text(m_cancelRequested.load() ? L"Đang hủy benchmark..." : L"Đang chạy Dijkstra, vui lòng chờ...");
+            co_return;
+        }
+
+        const int testCase = SelectedTestCase();
+        int source = 0;
+        int target = 0;
+        if (!TryParseInt(SourceNodeBox().Text(), source) || !TryParseInt(TargetNodeBox().Text(), target))
+        {
+            RenderGraph({});
+            StatusTextBlock().Text(L"Vui lòng nhập ID node là số nguyên");
+            co_return;
+        }
+
+        int iterations = 0;
+        if (!TryParseIterations(iterations))
+        {
+            RenderGraph({});
+            StatusTextBlock().Text(L"Iterations phải là số nguyên trong khoảng 1 đến 1000");
+            co_return;
         }
 
         if (source < 0 || source >= m_graph.VertexCount() || target < 0 || target >= m_graph.VertexCount())
         {
             RenderGraph({});
             StatusTextBlock().Text(L"Invalid input: source or target is out of range for the current graph.");
-            return;
+            co_return;
         }
 
+        // Prevent re-entry while a run is active to avoid overlapping heavy computations.
+        m_isSolving = true;
+        m_cancelRequested.store(false);
+        SetInteractionEnabled(false);
+        UpdateProgressUI(0, iterations);
+
+        const auto graphSnapshot = m_graph;
+        const int sourceSnapshot = source;
+        const int targetSnapshot = target;
+        const int testCaseSnapshot = testCase;
+        const auto weakThis = get_weak();
+        const auto uiQueue = DispatcherQueue();
+
+        ::DijkstraDeliverySystem::DijkstraResult result{};
+        std::string solveError;
+        bool cancelled = false;
+
+        co_await resume_background();
         try
         {
-            const auto result = m_solver.Solve(m_graph, source, target, iterations);
-            RenderGraph(result.Path, source, target);
-            StatusTextBlock().Text(BuildResultText(result, source, target, testCase));
+            result = m_solver.Solve(
+                graphSnapshot,
+                sourceSnapshot,
+                targetSnapshot,
+                iterations,
+                [this, uiQueue, weakThis](int completedIterations, int totalIterations)
+                {
+                    if (m_cancelRequested.load())
+                    {
+                        return false;
+                    }
+
+                    uiQueue.TryEnqueue([weakThis, completedIterations, totalIterations]()
+                    {
+                        if (auto self = weakThis.get())
+                        {
+                            self->UpdateProgressUI(completedIterations, totalIterations);
+                        }
+                    });
+
+                    return true;
+                });
+
+            cancelled = result.Cancelled || m_cancelRequested.load();
         }
         catch (std::exception const& ex)
         {
-            RenderGraph({});
-            StatusTextBlock().Text(winrt::to_hstring(std::string("Invalid input: ") + ex.what()));
+            solveError = ex.what();
         }
+        catch (...)
+        {
+            solveError = "Unexpected error during computation.";
+        }
+
+        co_await resume_foreground(uiQueue);
+
+        if (solveError.empty())
+        {
+            if (cancelled)
+            {
+                RenderGraph({});
+                StatusTextBlock().Text(L"Đã hủy benchmark theo yêu cầu.");
+            }
+            else
+            {
+                RenderGraph(result.Path, sourceSnapshot, targetSnapshot);
+                StatusTextBlock().Text(BuildResultText(result, sourceSnapshot, targetSnapshot, testCaseSnapshot));
+            }
+        }
+        else
+        {
+            RenderGraph({});
+            StatusTextBlock().Text(winrt::to_hstring(std::string("Invalid input: ") + solveError));
+        }
+
+        ResetProgressUI();
+        SetInteractionEnabled(true);
+        m_isSolving = false;
+        m_cancelRequested.store(false);
+    }
+
+    void MainWindow::CancelButton_Click(IInspectable const&, RoutedEventArgs const&)
+    {
+        if (!m_isSolving || m_cancelRequested.load())
+        {
+            return;
+        }
+
+        m_cancelRequested.store(true);
+        CancelButton().IsEnabled(false);
+        StatusTextBlock().Text(L"Đang hủy benchmark...");
     }
 
     void MainWindow::RenderGraph(std::vector<int> const& highlightedPath, int source, int target)
@@ -479,19 +585,112 @@ namespace winrt::DijkstraDeliverySystem::implementation
         }
     }
 
-    int MainWindow::ParseIntOrDefault(hstring const& text, int fallback) const
+    bool MainWindow::TryParseInt(hstring const& text, int& parsedValue) const
     {
+        std::wstring value{ text.c_str() };
+        const size_t firstNonSpace = value.find_first_not_of(L" \t\r\n");
+        if (firstNonSpace == std::wstring::npos)
+        {
+            return false;
+        }
+
+        const size_t lastNonSpace = value.find_last_not_of(L" \t\r\n");
+        value = value.substr(firstNonSpace, lastNonSpace - firstNonSpace + 1);
+
+        size_t digitStart = 0;
+        if (value[0] == L'+' || value[0] == L'-')
+        {
+            digitStart = 1;
+        }
+
+        if (digitStart == value.size())
+        {
+            return false;
+        }
+
+        for (size_t i = digitStart; i < value.size(); ++i)
+        {
+            if (!std::iswdigit(value[i]))
+            {
+                return false;
+            }
+        }
+
         try
         {
-            const std::string utf8 = winrt::to_string(text);
             size_t parsedLength = 0;
-            const int parsedValue = std::stoi(utf8, &parsedLength);
-            return (parsedLength == utf8.size()) ? parsedValue : fallback;
+            const int candidate = std::stoi(value, &parsedLength, 10);
+            if (parsedLength != value.size())
+            {
+                return false;
+            }
+
+            parsedValue = candidate;
+            return true;
         }
         catch (...)
         {
-            return fallback;
+            return false;
         }
+    }
+
+    void MainWindow::SetInteractionEnabled(bool isEnabled)
+    {
+        SolveButton().IsEnabled(isEnabled);
+        TestCaseBox().IsEnabled(isEnabled);
+        SourceNodeBox().IsEnabled(isEnabled);
+        TargetNodeBox().IsEnabled(isEnabled);
+        IterationBox().IsEnabled(isEnabled);
+        CancelButton().IsEnabled(!isEnabled && !m_cancelRequested.load());
+    }
+
+    void MainWindow::UpdateProgressUI(int completedIterations, int totalIterations)
+    {
+        auto progressBar = BenchmarkProgressBar();
+        if (progressBar != nullptr)
+        {
+            const double percent = (totalIterations > 0)
+                ? (static_cast<double>(completedIterations) * 100.0 / static_cast<double>(totalIterations))
+                : 0.0;
+
+            progressBar.Visibility(Visibility::Visible);
+            progressBar.Value(percent);
+
+            std::wstringstream stream;
+            stream << L"Đang chạy benchmark: " << completedIterations << L"/" << totalIterations
+                   << L" (" << static_cast<int>(percent) << L"%)";
+            StatusTextBlock().Text(hstring(stream.str()));
+        }
+    }
+
+    void MainWindow::ResetProgressUI()
+    {
+        auto progressBar = BenchmarkProgressBar();
+        if (progressBar == nullptr)
+        {
+            return;
+        }
+
+        progressBar.Value(0.0);
+        progressBar.Visibility(Visibility::Collapsed);
+    }
+
+    bool MainWindow::TryParseIterations(int& parsedValue) const
+    {
+        const double value = IterationBox().Value();
+        if (!std::isfinite(value))
+        {
+            return false;
+        }
+
+        const double roundedValue = std::round(value);
+        if (std::fabs(value - roundedValue) > 0.000001)
+        {
+            return false;
+        }
+
+        parsedValue = static_cast<int>(roundedValue);
+        return parsedValue >= 1 && parsedValue <= 1000;
     }
 
     hstring MainWindow::BuildResultText(::DijkstraDeliverySystem::DijkstraResult const& result, int source, int target, int testCase) const

@@ -4,6 +4,7 @@
 #include "DijkstraSolver.h"
 #include "MainWindow.g.h"
 
+#include <atomic>
 #include <vector>
 
 namespace winrt::DijkstraDeliverySystem::implementation
@@ -13,7 +14,8 @@ namespace winrt::DijkstraDeliverySystem::implementation
         MainWindow();
 
         void TestCaseBox_SelectionChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Controls::SelectionChangedEventArgs const& args);
-        void SolveButton_Click(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& args);
+        winrt::fire_and_forget SolveButton_Click(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& args);
+        void CancelButton_Click(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& args);
 
     private:
         enum class NodeAnimationRole
@@ -31,7 +33,11 @@ namespace winrt::DijkstraDeliverySystem::implementation
         void RenderGraph(std::vector<int> const& highlightedPath, int source = -1, int target = -1);
         void StartHighlightAnimation(winrt::Microsoft::UI::Xaml::UIElement const& element, int delayMs, bool forNode);
         void StartNodePulseAndShadow(winrt::Microsoft::UI::Xaml::UIElement const& element, int delayMs, winrt::Windows::UI::Color const& glowColor, NodeAnimationRole role);
-        int ParseIntOrDefault(winrt::hstring const& text, int fallback) const;
+        void SetInteractionEnabled(bool isEnabled);
+        void UpdateProgressUI(int completedIterations, int totalIterations);
+        void ResetProgressUI();
+        bool TryParseInt(winrt::hstring const& text, int& parsedValue) const;
+        bool TryParseIterations(int& parsedValue) const;
         winrt::hstring BuildResultText(::DijkstraDeliverySystem::DijkstraResult const& result, int source, int target, int testCase) const;
 
         ::DijkstraDeliverySystem::Graph m_graph;
@@ -40,6 +46,8 @@ namespace winrt::DijkstraDeliverySystem::implementation
         std::vector<winrt::Microsoft::UI::Xaml::Media::Animation::Storyboard> m_runningAnimations;
         int m_expectedDistance{ -1 };
         bool m_isUiReady{ false };
+        bool m_isSolving{ false };
+        std::atomic_bool m_cancelRequested{ false };
     };
 }
 
