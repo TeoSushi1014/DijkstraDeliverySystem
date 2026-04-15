@@ -423,31 +423,43 @@ namespace winrt::DijkstraDeliverySystem::implementation
             solveError = "Unexpected error during computation.";
         }
 
-        co_await resume_foreground(uiQueue);
-
-        if (solveError.empty())
+        uiQueue.TryEnqueue([weakThis,
+                            result = std::move(result),
+                            solveError = std::move(solveError),
+                            cancelled,
+                            sourceSnapshot,
+                            targetSnapshot,
+                            testCaseSnapshot]() mutable
         {
-            if (cancelled)
+            if (auto self = weakThis.get())
             {
-                RenderGraph({});
-                StatusTextBlock().Text(L"Đã hủy benchmark theo yêu cầu.");
-            }
-            else
-            {
-                RenderGraph(result.Path, sourceSnapshot, targetSnapshot);
-                StatusTextBlock().Text(BuildResultText(result, sourceSnapshot, targetSnapshot, testCaseSnapshot));
-            }
-        }
-        else
-        {
-            RenderGraph({});
-            StatusTextBlock().Text(winrt::to_hstring(std::string("Invalid input: ") + solveError));
-        }
+                if (solveError.empty())
+                {
+                    if (cancelled)
+                    {
+                        self->RenderGraph({});
+                        self->StatusTextBlock().Text(L"Đã hủy benchmark theo yêu cầu.");
+                    }
+                    else
+                    {
+                        self->RenderGraph(result.Path, sourceSnapshot, targetSnapshot);
+                        self->StatusTextBlock().Text(self->BuildResultText(result, sourceSnapshot, targetSnapshot, testCaseSnapshot));
+                    }
+                }
+                else
+                {
+                    self->RenderGraph({});
+                    self->StatusTextBlock().Text(winrt::to_hstring(std::string("Invalid input: ") + solveError));
+                }
 
-        ResetProgressUI();
-        SetInteractionEnabled(true);
-        m_isSolving = false;
-        m_cancelRequested.store(false);
+                self->ResetProgressUI();
+                self->SetInteractionEnabled(true);
+                self->m_isSolving = false;
+                self->m_cancelRequested.store(false);
+            }
+        });
+
+        co_return;
     }
 
     void MainWindow::CancelButton_Click(IInspectable const&, RoutedEventArgs const&)
@@ -675,7 +687,7 @@ namespace winrt::DijkstraDeliverySystem::implementation
         progressBar.Visibility(Visibility::Collapsed);
     }
 
-    bool MainWindow::TryParseIterations(int& parsedValue) const
+    bool MainWindow::TryParseIterations(int& parsedValue)
     {
         const double value = IterationBox().Value();
         if (!std::isfinite(value))

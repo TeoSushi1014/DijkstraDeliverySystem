@@ -37,7 +37,7 @@ namespace winrt::DijkstraDeliverySystem::implementation
         void UpdateProgressUI(int completedIterations, int totalIterations);
         void ResetProgressUI();
         bool TryParseInt(winrt::hstring const& text, int& parsedValue) const;
-        bool TryParseIterations(int& parsedValue) const;
+        bool TryParseIterations(int& parsedValue);
         winrt::hstring BuildResultText(::DijkstraDeliverySystem::DijkstraResult const& result, int source, int target, int testCase) const;
 
         ::DijkstraDeliverySystem::Graph m_graph;
