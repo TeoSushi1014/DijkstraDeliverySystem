@@ -8,11 +8,16 @@
 #include <chrono>
 #include <cmath>
 #include <cwctype>
+#include <functional>
 #include <iomanip>
+#include <memory>
+#include <psapi.h>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+
+#pragma comment(lib, "Psapi.lib")
 
 using namespace winrt;
 using namespace Windows::Foundation::Numerics;
@@ -24,6 +29,73 @@ using namespace Windows::Foundation;
 
 namespace
 {
+    struct ProgressUiState
+    {
+        std::atomic<int> latestCompleted{ 0 };
+        std::atomic<int> latestTotal{ 0 };
+        std::atomic<int> renderedCompleted{ 0 };
+        std::atomic<bool> workScheduled{ false };
+        std::atomic<bool> finished{ false };
+    };
+
+#ifdef _DEBUG
+    bool ShouldLogMemoryRun(int runIndex)
+    {
+        return runIndex == 1 || runIndex == 5 || runIndex == 10 || runIndex == 20;
+    }
+
+    size_t GetCurrentPrivateBytes()
+    {
+        PROCESS_MEMORY_COUNTERS_EX counters{};
+        counters.cb = sizeof(counters);
+
+        if (!::GetProcessMemoryInfo(
+            ::GetCurrentProcess(),
+            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
+            sizeof(counters)))
+        {
+            return 0;
+        }
+
+        return static_cast<size_t>(counters.PrivateUsage);
+    }
+
+    void LogPrivateBytesSnapshot(
+        int runIndex,
+        wchar_t const* phase,
+        size_t privateBytes,
+        size_t baselineBytes,
+        size_t runStartBytes)
+    {
+        constexpr double bytesPerMegabyte = 1024.0 * 1024.0;
+
+        const double privateMb = static_cast<double>(privateBytes) / bytesPerMegabyte;
+        const double baselineMb = static_cast<double>(baselineBytes) / bytesPerMegabyte;
+        const double runStartMb = static_cast<double>(runStartBytes) / bytesPerMegabyte;
+        const double runDeltaMb = privateMb - runStartMb;
+
+        double growthPercent = 0.0;
+        if (baselineBytes > 0)
+        {
+            growthPercent =
+                (static_cast<double>(privateBytes) - static_cast<double>(baselineBytes)) * 100.0 /
+                static_cast<double>(baselineBytes);
+        }
+
+        std::wstringstream stream;
+        stream << std::fixed << std::setprecision(2)
+               << L"[MEM] run=" << runIndex
+               << L" phase=" << phase
+               << L" private_mb=" << privateMb
+               << L" run_delta_mb=" << runDeltaMb
+               << L" baseline_mb=" << baselineMb
+               << L" growth_pct=" << growthPercent
+               << L"\n";
+
+        ::OutputDebugStringW(stream.str().c_str());
+    }
+#endif
+
     std::wstring ConvertMultibyteToWide(std::string const& value, UINT codePage, DWORD flags)
     {
         if (value.empty())
@@ -114,6 +186,16 @@ namespace winrt::DijkstraDeliverySystem::implementation
     {
         m_isUiReady = false;
         InitializeComponent();
+
+        if (const auto resources = Application::Current().Resources())
+        {
+            m_captionTextStyle = resources.Lookup(box_value(L"CaptionTextBlockStyle")).try_as<Style>();
+            m_bodyStrongTextStyle = resources.Lookup(box_value(L"BodyStrongTextBlockStyle")).try_as<Style>();
+        }
+
+        PathCanvas().SizeChanged({ this, &MainWindow::PathCanvas_SizeChanged });
+        m_lastResizeSignal = std::chrono::steady_clock::now();
+
         SetInteractionEnabled(true);
         ResetProgressUI();
         BuildSampleGraph();
@@ -280,14 +362,27 @@ namespace winrt::DijkstraDeliverySystem::implementation
         m_nodePositions.reserve(static_cast<size_t>(vertexCount));
 
         constexpr double pi = 3.14159265358979323846;
-        constexpr float centerX = 360.0f;
-        constexpr float centerY = 200.0f;
-        constexpr float radius = 160.0f;
 
         if (vertexCount <= 0)
         {
             return;
         }
+
+        double canvasWidth = PathCanvas().ActualWidth();
+        double canvasHeight = PathCanvas().ActualHeight();
+        if (canvasWidth < 120.0 || canvasHeight < 120.0)
+        {
+            // Actual size may be unavailable during initial load.
+            canvasWidth = 720.0;
+            canvasHeight = 420.0;
+        }
+
+        constexpr double outerPadding = 32.0;
+        const float centerX = static_cast<float>(canvasWidth / 2.0);
+        const float centerY = static_cast<float>(canvasHeight / 2.0);
+        const float radius = static_cast<float>((std::max)(
+            40.0,
+            (std::min)(canvasWidth, canvasHeight) / 2.0 - outerPadding));
 
         for (int i = 0; i < vertexCount; ++i)
         {
@@ -324,6 +419,82 @@ namespace winrt::DijkstraDeliverySystem::implementation
         SetInputsForTestCase(testCase);
         RenderGraph({});
         statusTextBlock.Text(L"Test case loaded. Press Run Dijkstra to evaluate.");
+    }
+
+    void MainWindow::PathCanvas_SizeChanged(IInspectable const&, SizeChangedEventArgs const& args)
+    {
+        if (!m_isUiReady)
+        {
+            return;
+        }
+
+        const auto newSize = args.NewSize();
+        if (std::abs(static_cast<double>(newSize.Width) - m_lastCanvasWidth) < 0.5 &&
+            std::abs(static_cast<double>(newSize.Height) - m_lastCanvasHeight) < 0.5)
+        {
+            return;
+        }
+
+        m_lastCanvasWidth = static_cast<double>(newSize.Width);
+        m_lastCanvasHeight = static_cast<double>(newSize.Height);
+
+        m_resizePending = true;
+        m_resizeNeedsFinalRender = true;
+        m_resizeActive = true;
+        m_lastResizeSignal = std::chrono::steady_clock::now();
+
+        EnsureResizeTimer();
+        if (!m_resizeTimer.IsRunning())
+        {
+            m_resizeTimer.Start();
+        }
+    }
+
+    void MainWindow::EnsureResizeTimer()
+    {
+        if (m_resizeTimer != nullptr)
+        {
+            return;
+        }
+
+        m_resizeTimer = DispatcherQueue().CreateTimer();
+        m_resizeTimer.IsRepeating(true);
+        m_resizeTimer.Interval(std::chrono::milliseconds(120));
+        m_resizeTimer.Tick({ this, &MainWindow::ResizeTimer_Tick });
+    }
+
+    void MainWindow::ResizeTimer_Tick(Microsoft::UI::Dispatching::DispatcherQueueTimer const& sender, IInspectable const&)
+    {
+        if (!m_resizeActive)
+        {
+            sender.Stop();
+            return;
+        }
+
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - m_lastResizeSignal);
+        const bool stillResizing = elapsed < std::chrono::milliseconds(220);
+
+        if (m_resizePending)
+        {
+            m_resizePending = false;
+            GenerateNodePositions(m_graph.VertexCount());
+            RenderGraph(m_lastHighlightedPath, m_lastHighlightedSource, m_lastHighlightedTarget, false);
+        }
+
+        if (!stillResizing)
+        {
+            if (m_resizeNeedsFinalRender)
+            {
+                m_resizeNeedsFinalRender = false;
+                GenerateNodePositions(m_graph.VertexCount());
+                RenderGraph(m_lastHighlightedPath, m_lastHighlightedSource, m_lastHighlightedTarget, true);
+            }
+
+            m_resizePending = false;
+            m_resizeActive = false;
+            sender.Stop();
+        }
     }
 
     void MainWindow::StartHighlightAnimation(UIElement const& element, int delayMs, bool forNode)
@@ -417,6 +588,17 @@ namespace winrt::DijkstraDeliverySystem::implementation
         shadowOpacityAnimation.Duration(shadowDuration);
 
         shadowVisual.StartAnimation(L"Opacity", shadowOpacityAnimation);
+
+        if (const auto existingChildVisual = ElementCompositionPreview::GetElementChildVisual(element))
+        {
+            existingChildVisual.StopAnimation(L"Opacity");
+            if (const auto existingSpriteVisual = existingChildVisual.try_as<Microsoft::UI::Composition::SpriteVisual>())
+            {
+                existingSpriteVisual.Shadow(nullptr);
+            }
+        }
+
+        ElementCompositionPreview::SetElementChildVisual(element, nullptr);
         ElementCompositionPreview::SetElementChildVisual(element, shadowVisual);
     }
 
@@ -461,12 +643,92 @@ namespace winrt::DijkstraDeliverySystem::implementation
         SetInteractionEnabled(false);
         UpdateProgressUI(0, iterations);
 
+        int runIndex = 0;
+        size_t runStartPrivateBytes = 0;
+        size_t baselinePrivateBytes = 0;
+#ifdef _DEBUG
+        static std::atomic<int> debugRunCounter{ 0 };
+        static std::atomic<size_t> debugBaselinePrivateBytes{ 0 };
+
+        runIndex = debugRunCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+        runStartPrivateBytes = GetCurrentPrivateBytes();
+
+        baselinePrivateBytes = debugBaselinePrivateBytes.load(std::memory_order_relaxed);
+        if (baselinePrivateBytes == 0)
+        {
+            size_t expected = 0;
+            if (debugBaselinePrivateBytes.compare_exchange_strong(expected, runStartPrivateBytes, std::memory_order_relaxed))
+            {
+                baselinePrivateBytes = runStartPrivateBytes;
+            }
+            else
+            {
+                baselinePrivateBytes = expected;
+            }
+        }
+
+        if (ShouldLogMemoryRun(runIndex))
+        {
+            LogPrivateBytesSnapshot(runIndex, L"START", runStartPrivateBytes, baselinePrivateBytes, runStartPrivateBytes);
+        }
+#endif
+
         const auto graphSnapshot = m_graph;
         const int sourceSnapshot = source;
         const int targetSnapshot = target;
         const int testCaseSnapshot = testCase;
         const auto weakThis = get_weak();
         const auto uiQueue = DispatcherQueue();
+        auto progressUiState = std::make_shared<ProgressUiState>();
+        progressUiState->latestTotal.store(iterations, std::memory_order_relaxed);
+
+        auto scheduleProgressUpdate = std::make_shared<std::function<void()>>();
+        *scheduleProgressUpdate = [weakThis, uiQueue, progressUiState, scheduleProgressUpdate]()
+        {
+            if (progressUiState->finished.load(std::memory_order_acquire))
+            {
+                return;
+            }
+
+            if (progressUiState->workScheduled.exchange(true, std::memory_order_acq_rel))
+            {
+                return;
+            }
+
+            uiQueue.TryEnqueue(Microsoft::UI::Dispatching::DispatcherQueuePriority::Low,
+                [weakThis, uiQueue, progressUiState, scheduleProgressUpdate]()
+            {
+                if (!progressUiState->finished.load(std::memory_order_acquire))
+                {
+                    if (auto self = weakThis.get())
+                    {
+                        const int latestCompleted = progressUiState->latestCompleted.load(std::memory_order_relaxed);
+                        const int latestTotal = progressUiState->latestTotal.load(std::memory_order_relaxed);
+                        const int renderedCompleted = progressUiState->renderedCompleted.load(std::memory_order_relaxed);
+
+                        if (latestCompleted != renderedCompleted || latestCompleted == latestTotal)
+                        {
+                            self->UpdateProgressUI(latestCompleted, latestTotal);
+                            progressUiState->renderedCompleted.store(latestCompleted, std::memory_order_relaxed);
+                        }
+                    }
+                }
+
+                progressUiState->workScheduled.store(false, std::memory_order_release);
+
+                if (progressUiState->finished.load(std::memory_order_acquire))
+                {
+                    return;
+                }
+
+                const int latestCompleted = progressUiState->latestCompleted.load(std::memory_order_relaxed);
+                const int renderedCompleted = progressUiState->renderedCompleted.load(std::memory_order_relaxed);
+                if (latestCompleted != renderedCompleted)
+                {
+                    (*scheduleProgressUpdate)();
+                }
+            });
+        };
 
         ::DijkstraDeliverySystem::DijkstraResult result{};
         hstring solveError;
@@ -480,20 +742,16 @@ namespace winrt::DijkstraDeliverySystem::implementation
                 sourceSnapshot,
                 targetSnapshot,
                 iterations,
-                [this, uiQueue, weakThis](int completedIterations, int totalIterations)
+                [this, progressUiState, scheduleProgressUpdate](int completedIterations, int totalIterations)
                 {
                     if (m_cancelRequested.load())
                     {
                         return false;
                     }
 
-                    uiQueue.TryEnqueue([weakThis, completedIterations, totalIterations]()
-                    {
-                        if (auto self = weakThis.get())
-                        {
-                            self->UpdateProgressUI(completedIterations, totalIterations);
-                        }
-                    });
+                    progressUiState->latestCompleted.store(completedIterations, std::memory_order_relaxed);
+                    progressUiState->latestTotal.store(totalIterations, std::memory_order_relaxed);
+                    (*scheduleProgressUpdate)();
 
                     return true;
                 });
@@ -509,13 +767,18 @@ namespace winrt::DijkstraDeliverySystem::implementation
             solveError = L"Lỗi không xác định trong quá trình tính toán.";
         }
 
+        progressUiState->finished.store(true, std::memory_order_release);
+
         uiQueue.TryEnqueue([weakThis,
                             result = std::move(result),
                             solveError = std::move(solveError),
                             cancelled,
                             sourceSnapshot,
                             targetSnapshot,
-                            testCaseSnapshot]() mutable
+                            testCaseSnapshot,
+                            runIndex,
+                            runStartPrivateBytes,
+                            baselinePrivateBytes]() mutable
         {
             if (auto self = weakThis.get())
             {
@@ -537,6 +800,14 @@ namespace winrt::DijkstraDeliverySystem::implementation
                     self->RenderGraph({});
                     self->StatusTextBlock().Text(BuildSolveErrorMessage(solveError));
                 }
+
+#ifdef _DEBUG
+                if (ShouldLogMemoryRun(runIndex))
+                {
+                    const size_t runEndPrivateBytes = GetCurrentPrivateBytes();
+                    LogPrivateBytesSnapshot(runIndex, L"END", runEndPrivateBytes, baselinePrivateBytes, runStartPrivateBytes);
+                }
+#endif
 
                 self->ResetProgressUI();
                 self->SetInteractionEnabled(true);
@@ -560,15 +831,43 @@ namespace winrt::DijkstraDeliverySystem::implementation
         StatusTextBlock().Text(L"Đang hủy benchmark...");
     }
 
-    void MainWindow::RenderGraph(std::vector<int> const& highlightedPath, int source, int target)
+    void MainWindow::RenderGraph(std::vector<int> const& highlightedPath, int source, int target, bool enableEffects)
     {
+        m_lastHighlightedPath = highlightedPath;
+        m_lastHighlightedSource = source;
+        m_lastHighlightedTarget = target;
+
+        auto children = PathCanvas().Children();
+        for (uint32_t i = 0; i < children.Size(); ++i)
+        {
+            if (auto element = children.GetAt(i).try_as<UIElement>())
+            {
+                const auto childVisual = Microsoft::UI::Xaml::Hosting::ElementCompositionPreview::GetElementChildVisual(element);
+                if (childVisual != nullptr)
+                {
+                    childVisual.StopAnimation(L"Opacity");
+                    if (const auto spriteVisual = childVisual.try_as<Microsoft::UI::Composition::SpriteVisual>())
+                    {
+                        spriteVisual.Shadow(nullptr);
+                    }
+                }
+
+                const auto visual = Microsoft::UI::Xaml::Hosting::ElementCompositionPreview::GetElementVisual(element);
+                if (visual != nullptr)
+                {
+                    visual.StopAnimation(L"Scale");
+                }
+
+                Microsoft::UI::Xaml::Hosting::ElementCompositionPreview::SetElementChildVisual(element, nullptr);
+            }
+        }
+
         for (auto& storyboard : m_runningAnimations)
         {
             storyboard.Stop();
         }
         m_runningAnimations.clear();
-
-        PathCanvas().Children().Clear();
+        children.Clear();
 
         auto makeColor = [](uint8_t a, uint8_t r, uint8_t g, uint8_t b)
         {
@@ -618,7 +917,7 @@ namespace winrt::DijkstraDeliverySystem::implementation
                 line.Y1(start.Y);
                 line.X2(end.X);
                 line.Y2(end.Y);
-                line.Stroke(SolidColorBrush(onPath ? makeColor(255, 220, 38, 38) : makeColor(255, 148, 163, 184)));
+                line.Stroke(GetCachedBrush(onPath ? makeColor(255, 220, 38, 38) : makeColor(255, 148, 163, 184)));
                 line.StrokeThickness(onPath ? 4.0 : 2.0);
                 PathCanvas().Children().Append(line);
 
@@ -627,12 +926,18 @@ namespace winrt::DijkstraDeliverySystem::implementation
                     const int fromOrder = pathOrder.contains(from) ? pathOrder[from] : 0;
                     const int toOrder = pathOrder.contains(to) ? pathOrder[to] : fromOrder;
                     const int delay = (std::min)(fromOrder, toOrder) * 120;
-                    StartHighlightAnimation(line, delay, false);
+                    if (enableEffects)
+                    {
+                        StartHighlightAnimation(line, delay, false);
+                    }
                 }
 
                 TextBlock weightLabel;
                 weightLabel.Text(winrt::to_hstring(weight));
-                weightLabel.Style(Application::Current().Resources().Lookup(box_value(L"CaptionTextBlockStyle")).as<Style>());
+                if (m_captionTextStyle != nullptr)
+                {
+                    weightLabel.Style(m_captionTextStyle);
+                }
                 Canvas::SetLeft(weightLabel, (start.X + end.X) / 2.0 + 4.0);
                 Canvas::SetTop(weightLabel, (start.Y + end.Y) / 2.0 - 16.0);
                 PathCanvas().Children().Append(weightLabel);
@@ -655,15 +960,15 @@ namespace winrt::DijkstraDeliverySystem::implementation
             Microsoft::UI::Xaml::Shapes::Ellipse circle;
             circle.Width(nodeDiameter);
             circle.Height(nodeDiameter);
-            circle.Fill(SolidColorBrush(nodeColor));
-            circle.Stroke(SolidColorBrush(makeColor(255, 241, 245, 249)));
+            circle.Fill(GetCachedBrush(nodeColor));
+            circle.Stroke(GetCachedBrush(makeColor(255, 241, 245, 249)));
             circle.StrokeThickness(2.0);
 
             Canvas::SetLeft(circle, position.X - (nodeDiameter / 2.0));
             Canvas::SetTop(circle, position.Y - (nodeDiameter / 2.0));
             PathCanvas().Children().Append(circle);
 
-            if (onPath || isSource || isTarget)
+            if (enableEffects && (onPath || isSource || isTarget))
             {
                 const int delay = pathOrder.contains(node) ? (pathOrder[node] * 120 + 60) : 0;
                 StartHighlightAnimation(circle, delay, true);
@@ -675,12 +980,40 @@ namespace winrt::DijkstraDeliverySystem::implementation
 
             TextBlock nodeLabel;
             nodeLabel.Text(winrt::to_hstring(node));
-            nodeLabel.Foreground(SolidColorBrush(makeColor(255, 255, 255, 255)));
-            nodeLabel.Style(Application::Current().Resources().Lookup(box_value(L"BodyStrongTextBlockStyle")).as<Style>());
+            nodeLabel.Foreground(GetCachedBrush(makeColor(255, 255, 255, 255)));
+            if (m_bodyStrongTextStyle != nullptr)
+            {
+                nodeLabel.Style(m_bodyStrongTextStyle);
+            }
             Canvas::SetLeft(nodeLabel, position.X - 5.0);
             Canvas::SetTop(nodeLabel, position.Y - 10.0);
             PathCanvas().Children().Append(nodeLabel);
         }
+    }
+
+    SolidColorBrush MainWindow::GetCachedBrush(Windows::UI::Color const& color)
+    {
+        const uint32_t key =
+            (static_cast<uint32_t>(color.A) << 24) |
+            (static_cast<uint32_t>(color.R) << 16) |
+            (static_cast<uint32_t>(color.G) << 8) |
+            static_cast<uint32_t>(color.B);
+
+        const auto cachedBrush = m_brushCache.find(key);
+        if (cachedBrush != m_brushCache.end())
+        {
+            return cachedBrush->second;
+        }
+
+        if (m_brushCache.size() >= 32)
+        {
+            // Keep brush cache bounded in case future render logic introduces dynamic colors.
+            m_brushCache.clear();
+        }
+
+        auto brush = SolidColorBrush(color);
+        m_brushCache.emplace(key, brush);
+        return brush;
     }
 
     bool MainWindow::TryParseInt(hstring const& text, int& parsedValue) const
