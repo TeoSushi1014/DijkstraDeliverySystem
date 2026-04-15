@@ -22,6 +22,92 @@ using namespace Microsoft::UI::Xaml::Media;
 using namespace Microsoft::UI::Xaml::Shapes;
 using namespace Windows::Foundation;
 
+namespace
+{
+    std::wstring ConvertMultibyteToWide(std::string const& value, UINT codePage, DWORD flags)
+    {
+        if (value.empty())
+        {
+            return {};
+        }
+
+        const int sourceLength = static_cast<int>(value.size());
+        const int requiredLength = ::MultiByteToWideChar(codePage, flags, value.data(), sourceLength, nullptr, 0);
+        if (requiredLength <= 0)
+        {
+            return {};
+        }
+
+        std::wstring wideValue(static_cast<size_t>(requiredLength), L'\0');
+        const int convertedLength = ::MultiByteToWideChar(
+            codePage,
+            flags,
+            value.data(),
+            sourceLength,
+            wideValue.data(),
+            requiredLength);
+
+        if (convertedLength <= 0)
+        {
+            return {};
+        }
+
+        return wideValue;
+    }
+
+    hstring DecodeErrorText(std::string const& value)
+    {
+        if (value.empty())
+        {
+            return {};
+        }
+
+        const auto utf8Value = ConvertMultibyteToWide(value, CP_UTF8, MB_ERR_INVALID_CHARS);
+        if (!utf8Value.empty())
+        {
+            return hstring(utf8Value);
+        }
+
+        const auto ansiValue = ConvertMultibyteToWide(value, CP_ACP, 0);
+        if (!ansiValue.empty())
+        {
+            return hstring(ansiValue);
+        }
+
+        return L"Dữ liệu lỗi không hợp lệ.";
+    }
+
+    hstring ToVietnameseSolveError(std::string const& value)
+    {
+        if (value.find("source vertex is out of range") != std::string::npos ||
+            value.find("target vertex is out of range") != std::string::npos ||
+            value.find("vertex index is out of range") != std::string::npos)
+        {
+            return L"ID node nguồn hoặc đích nằm ngoài phạm vi của đồ thị.";
+        }
+
+        if (value.find("graph must contain at least one vertex") != std::string::npos)
+        {
+            return L"Đồ thị phải có ít nhất một node.";
+        }
+
+        const auto decodedValue = DecodeErrorText(value);
+        if (decodedValue.empty())
+        {
+            return L"Dữ liệu đầu vào không hợp lệ.";
+        }
+
+        return decodedValue;
+    }
+
+    hstring BuildSolveErrorMessage(hstring const& detail)
+    {
+        std::wstring message = L"Lỗi xử lý dữ liệu: ";
+        message += detail.c_str();
+        return hstring(message);
+    }
+}
+
 namespace winrt::DijkstraDeliverySystem::implementation
 {
     MainWindow::MainWindow()
@@ -365,7 +451,7 @@ namespace winrt::DijkstraDeliverySystem::implementation
         if (source < 0 || source >= m_graph.VertexCount() || target < 0 || target >= m_graph.VertexCount())
         {
             RenderGraph({});
-            StatusTextBlock().Text(L"Invalid input: source or target is out of range for the current graph.");
+            StatusTextBlock().Text(L"ID node nguồn hoặc đích nằm ngoài phạm vi của đồ thị hiện tại.");
             co_return;
         }
 
@@ -383,7 +469,7 @@ namespace winrt::DijkstraDeliverySystem::implementation
         const auto uiQueue = DispatcherQueue();
 
         ::DijkstraDeliverySystem::DijkstraResult result{};
-        std::string solveError;
+        hstring solveError;
         bool cancelled = false;
 
         co_await resume_background();
@@ -416,11 +502,11 @@ namespace winrt::DijkstraDeliverySystem::implementation
         }
         catch (std::exception const& ex)
         {
-            solveError = ex.what();
+            solveError = ToVietnameseSolveError(ex.what());
         }
         catch (...)
         {
-            solveError = "Unexpected error during computation.";
+            solveError = L"Lỗi không xác định trong quá trình tính toán.";
         }
 
         uiQueue.TryEnqueue([weakThis,
@@ -449,7 +535,7 @@ namespace winrt::DijkstraDeliverySystem::implementation
                 else
                 {
                     self->RenderGraph({});
-                    self->StatusTextBlock().Text(winrt::to_hstring(std::string("Invalid input: ") + solveError));
+                    self->StatusTextBlock().Text(BuildSolveErrorMessage(solveError));
                 }
 
                 self->ResetProgressUI();
